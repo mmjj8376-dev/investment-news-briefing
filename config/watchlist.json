@@ -1,0 +1,23 @@
+{
+  "stocks": [
+    "AAPL",
+    "AVGO",
+    "GOOGL",
+    "LLY",
+    "META",
+    "MSFT",
+    "NVDA",
+    "TSLA"
+  ],
+  "etfs": [
+    "BOTZ",
+    "GRID",
+    "IBB",
+    "ITA",
+    "KBWB",
+    "NLR",
+    "PAVE",
+    "SMH",
+    "XLK"
+  ]
+}
