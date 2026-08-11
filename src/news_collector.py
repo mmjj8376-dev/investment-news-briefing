@@ -206,15 +206,24 @@ def classify_source_tier(source_name, company=None):
 # Deduplication -- multiple outlets covering the same event become one event
 #
 # Different outlets word the same story very differently ("Jefferies
-# Downgrades Apple" vs "AAPL Falls After Jefferies Downgrades Stock" vs
-# "Apple Stock Price Forecast: Jefferies Downgrades Rating..."). Comparing
-# raw character sequences (difflib) misses these because the word order and
-# surrounding text differ too much, even though the same handful of
-# distinctive words (jefferies, downgrade, apple) appear in all three. A
-# word-overlap (Jaccard) check catches that case since it ignores order and
-# length, so titles are merged if EITHER signal indicates a match.
+# Downgrades Apple" vs "AAPL Falls After Jefferies Downgrades Stock Over 20th
+# Anniversary iPhone Setback -- But Gene Munster Sees 'Strong Next 12
+# Months'"). Comparing raw character sequences (difflib) misses these
+# because word order/length differ too much, even though the same handful of
+# distinctive words (jefferies, downgrades, aapl) appear in both.
+#
+# A plain Jaccard word-overlap ratio (shared / union) *also* misses this
+# specific case: one outlet's headline is much longer/more detailed than the
+# other's, so the union is large and dilutes the ratio even though the short
+# headline's words are almost entirely contained in the long one. The
+# overlap coefficient (shared / smaller-title's word count) is robust to
+# that length asymmetry -- it asks "does most of the SHORTER title's content
+# also appear in the other one?" rather than "do the two titles look similar
+# overall?". A minimum shared-word count guards against two short titles
+# matching on a single incidental word.
 # ---------------------------------------------------------------------------
 DEDUP_WORD_OVERLAP = 0.4
+DEDUP_MIN_SHARED_WORDS = 2
 
 STOPWORDS = {
     "the", "a", "an", "and", "or", "but", "of", "in", "on", "at", "to", "for",
@@ -239,8 +248,11 @@ def title_word_set(norm_title):
 def word_overlap_ratio(words_a, words_b):
     if not words_a or not words_b:
         return 0.0
-    union = words_a | words_b
-    return len(words_a & words_b) / len(union) if union else 0.0
+    shared = len(words_a & words_b)
+    if shared < DEDUP_MIN_SHARED_WORDS:
+        return 0.0
+    smaller = min(len(words_a), len(words_b))
+    return shared / smaller if smaller else 0.0
 
 
 def cluster_articles(articles):
@@ -555,7 +567,12 @@ TICKER_PROMPT_TEMPLATE = """\
 - 관련 (ETF인 경우만: ETF 자체 / 보유종목 / 섹터 중 어느 것인지)
 - 한줄 요약
 - 투자 코멘트
-- 주가 영향
+- 주가 영향: "하방 압력 가능", "단기 변동성 확대" 같은 두루뭉술한 말만 쓰지
+  마세요. previous_close의 실제 종가·등락률 숫자를 근거로 구체적으로
+  쓰세요. 예: "이미 전일 -1.62% 하락한 상태에서 이 뉴스가 추가 하방
+  압력으로 작용할 가능성" 처럼, 지금 이 종목이 실제로 얼마나/어느
+  방향으로 움직였는지를 문장에 반영하세요. previous_close가 null이면
+  숫자를 지어내지 말고 "전일 가격 데이터 없음"이라고 쓰세요.
 - 추가 확인 필요 (없으면 "없음")
 - 대표 출처 (필요시 추가 출처도)
 - 기사 시간
