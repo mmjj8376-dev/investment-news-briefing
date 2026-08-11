@@ -27,7 +27,7 @@ jobs:
 
       - name: Install Copilot CLI only when a Copilot token exists
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MODELS_TOKEN }}
         run: |
           if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
             echo "PERSONAL_ACCESS_TOKEN is not configured."
@@ -39,7 +39,7 @@ jobs:
       - name: Run Copilot CLI when available
         continue-on-error: true
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MODELS_TOKEN }}
         run: |
           if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
             echo "Copilot token not present. Keeping output/briefing.md fallback."
