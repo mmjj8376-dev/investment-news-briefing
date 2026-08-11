@@ -86,6 +86,10 @@ jobs:
         id: kst_date
         run: echo "today=$(TZ='Asia/Seoul' date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
+      - name: Render briefing to HTML so links are clickable
+        if: always()
+        run: python src/render_email_html.py
+
       - name: Email the briefing
         if: always()
         uses: dawidd6/action-send-mail@v3
@@ -98,3 +102,4 @@ jobs:
           to: mmjj8376@poba.or.kr
           from: 투자 뉴스 브리핑 <${{ secrets.GMAIL_ADDRESS }}>
           body: file://output/briefing.md
+          html_body: file://output/briefing.html

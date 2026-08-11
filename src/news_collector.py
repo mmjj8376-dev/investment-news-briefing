@@ -204,23 +204,59 @@ def classify_source_tier(source_name, company=None):
 
 # ---------------------------------------------------------------------------
 # Deduplication -- multiple outlets covering the same event become one event
+#
+# Different outlets word the same story very differently ("Jefferies
+# Downgrades Apple" vs "AAPL Falls After Jefferies Downgrades Stock" vs
+# "Apple Stock Price Forecast: Jefferies Downgrades Rating..."). Comparing
+# raw character sequences (difflib) misses these because the word order and
+# surrounding text differ too much, even though the same handful of
+# distinctive words (jefferies, downgrade, apple) appear in all three. A
+# word-overlap (Jaccard) check catches that case since it ignores order and
+# length, so titles are merged if EITHER signal indicates a match.
 # ---------------------------------------------------------------------------
+DEDUP_WORD_OVERLAP = 0.4
+
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "of", "in", "on", "at", "to", "for",
+    "with", "as", "is", "are", "was", "were", "be", "been", "it", "its",
+    "this", "that", "after", "over", "amid", "than", "into", "up", "down",
+    "out", "about", "against", "why", "what", "how", "will", "would", "could",
+    "should", "stock", "stocks", "shares", "share", "says", "say", "said",
+    "report", "reports", "reported", "news", "here", "now", "today",
+}
+
+
 def normalize_title(title):
     lowered = title.lower()
     lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
     return re.sub(r"\s+", " ", lowered).strip()
 
 
+def title_word_set(norm_title):
+    return {w for w in norm_title.split() if len(w) > 2 and w not in STOPWORDS}
+
+
+def word_overlap_ratio(words_a, words_b):
+    if not words_a or not words_b:
+        return 0.0
+    union = words_a | words_b
+    return len(words_a & words_b) / len(union) if union else 0.0
+
+
 def cluster_articles(articles):
     clusters = []
     for art in articles:
         norm = normalize_title(art["title"])
+        words = title_word_set(norm)
         placed = False
         for cluster in clusters:
             rep = cluster[0]
-            ratio = difflib.SequenceMatcher(None, norm, normalize_title(rep["title"])).ratio()
+            rep_norm = normalize_title(rep["title"])
+            char_ratio = difflib.SequenceMatcher(None, norm, rep_norm).ratio()
+            overlap = word_overlap_ratio(words, title_word_set(rep_norm))
             hours_apart = abs((art["published"] - rep["published"]).total_seconds()) / 3600
-            if ratio >= DEDUP_TITLE_SIMILARITY and hours_apart <= DEDUP_TIME_WINDOW_HOURS:
+            is_match = char_ratio >= DEDUP_TITLE_SIMILARITY or overlap >= DEDUP_WORD_OVERLAP
+            if is_match and hours_apart <= DEDUP_TIME_WINDOW_HOURS:
                 cluster.append(art)
                 cluster.sort(key=lambda a: (a["source_tier"], a["published"]))
                 placed = True
@@ -497,7 +533,11 @@ TICKER_PROMPT_TEMPLATE = """\
    보여주세요. previous_close가 null이면 "전일 종가: 데이터 조회 실패"
    라고 쓰고 브리핑은 계속 작성하세요.
 6. 같은 사건을 다룬 뉴스는 이미 하나의 이벤트로 합쳐져 있습니다
-   (primary_source가 대표 출처, secondary_sources가 추가 출처).
+   (primary_source가 대표 출처, secondary_sources가 추가 출처). 그래도
+   제목만 다르고 실제로는 같은 사건(예: 같은 애널리스트의 같은 하향
+   리포트를 여러 매체가 다르게 표현한 경우)으로 보이는 이벤트가 남아
+   있다면, 그것들도 당신이 판단해서 하나의 항목으로 합치고 출처를
+   나열하세요. 표현이 다르다고 다른 사건인 것은 아닙니다.
 7. is_etf가 true이면 이 종목은 ETF입니다. 이 경우 events 안의 각 뉴스에는
    related_to_display 필드가 있어서 그 뉴스가 "ETF 자체", "보유종목 중
    하나(어떤 종목인지 표시됨)", "섹터 전반" 중 무엇과 관련있는지 알려줍니다.
