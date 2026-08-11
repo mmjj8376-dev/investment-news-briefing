@@ -3,18 +3,24 @@ name: Test News Collector
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  models: read
+
 jobs:
   run-news-test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Run news collector
+      - name: Run news collector and AI analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python src/news_collector.py
