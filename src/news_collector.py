@@ -1,5 +1,5 @@
 """
-Collects recent news for every ticker in config/watchlist.json, removes
+Collects recent news for every entry in config/watchlist.json, removes
 duplicate coverage of the same event, pre-scores each remaining event
 (0-100 importance, -3..+3 direction), attaches the previous day's closing
 price/change, and writes three files under output/:
@@ -7,6 +7,12 @@ price/change, and writes three files under output/:
   - ai_input.json        structured data handed to the AI
   - copilot_prompt.txt   instructions + ai_input.json for the Copilot CLI
   - briefing.md          zero-cost rule-based fallback briefing
+
+A watchlist entry can be a plain stock ({"ticker","company"}) or an ETF
+({"ticker","company","type":"etf","sector":...,"top_holdings":[...]}). For
+an ETF, news is collected for the fund itself, for each of its top holdings,
+and for its sector, then merged into one deduplicated, importance-sorted
+list. Each event is tagged with which of those it relates to.
 
 No third-party packages are required (the GitHub Actions workflow does not
 run `pip install`), so only the Python standard library is used.
@@ -20,6 +26,9 @@ Design rules (do not silently reintroduce old limits):
     for the AI) -- it stays disabled (None) unless someone deliberately
     turns it on.
   - A failed price lookup must never abort the news pipeline.
+  - ETF top holdings are read from watchlist.json, not fetched live --
+    free holdings APIs are unreliable/rate-limited, so holdings are
+    maintained by hand and should be refreshed every month or two.
 """
 
 import difflib
@@ -63,11 +72,14 @@ TIER2_KEYWORDS = [
 TIER_SCORE = {1: 5, 2: 3, 3: 1}
 
 # Clickbait / opinion pieces get dropped entirely, not just down-scored.
+# (Sector-level searches surface a lot of "N stocks to buy" listicles, so
+# a few extra patterns are included for that case.)
 LOW_QUALITY_TITLE_PATTERNS = [
     r"should you buy", r"should you sell", r"is it time to buy",
     r"is now the time", r"here'?s why", r"\btop \d+ stocks\b",
     r"\d+ reasons? (?:to|why)", r"better buy", r"buy or sell",
-    r"should investors", r"is .* a buy",
+    r"should investors", r"is .* a buy", r"stocks to (?:buy|watch|avoid|sell)",
+    r"best .* stocks", r"top picks", r"stocks? to consider",
 ]
 
 # ---------------------------------------------------------------------------
@@ -120,8 +132,7 @@ DIRECTION_LABELS = {
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
-def fetch_google_news(ticker, company):
-    query = f'"{company}" OR {ticker} stock'
+def fetch_news_by_query(query, label):
     url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
         {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
     )
@@ -130,13 +141,13 @@ def fetch_google_news(ticker, company):
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = resp.read()
     except (urllib.error.URLError, TimeoutError) as exc:
-        print(f"[WARN] {ticker}: failed to fetch news ({exc})")
+        print(f"[WARN] {label}: failed to fetch news ({exc})")
         return []
 
     try:
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError as exc:
-        print(f"[WARN] {ticker}: failed to parse RSS ({exc})")
+        print(f"[WARN] {label}: failed to parse RSS ({exc})")
         return []
 
     items = []
@@ -173,11 +184,11 @@ def is_low_quality(title):
     return any(re.search(pattern, lowered) for pattern in LOW_QUALITY_TITLE_PATTERNS)
 
 
-def classify_source_tier(source_name, company):
+def classify_source_tier(source_name, company=None):
     lowered = source_name.lower()
     if any(k in lowered for k in TIER1_KEYWORDS):
         return 1
-    if company.lower() in lowered and ("newsroom" in lowered or " ir" in f" {lowered}"):
+    if company and company.lower() in lowered and ("newsroom" in lowered or " ir" in f" {lowered}"):
         return 1
     if any(k in lowered for k in TIER2_KEYWORDS):
         return 2
@@ -214,7 +225,8 @@ def cluster_articles(articles):
     for cluster in clusters:
         rep = cluster[0]
         secondary = sorted({m["source"] for m in cluster[1:] if m["source"] != rep["source"]})
-        events.append({**rep, "secondary_sources": secondary})
+        related_to = sorted({m["related_to"] for m in cluster})
+        events.append({**rep, "secondary_sources": secondary, "related_to": related_to})
     return events
 
 
@@ -267,9 +279,61 @@ def compute_direction(event):
     return max(-3, min(3, net))
 
 
-def collect_for_ticker(ticker, company, now):
-    raw = fetch_google_news(ticker, company)
+def build_queries_for_stock(stock):
+    """Return [(search_query, company_for_tier_check, related_to_tag), ...].
+
+    A plain stock has exactly one query. An ETF has one query for the fund
+    itself, one per top holding, and (if a sector is set) one sector query.
+    """
+    ticker = stock["ticker"]
+    company = stock["company"]
+
+    if stock.get("type") != "etf":
+        return [(f'"{company}" OR {ticker} stock', company, ticker)]
+
+    queries = [(f'"{company}" OR {ticker} ETF', company, ticker)]
+    for holding in stock.get("top_holdings", []):
+        h_ticker = holding["ticker"]
+        h_company = holding["company"]
+        queries.append((f'"{h_company}" OR {h_ticker} stock', h_company, f"holding:{h_ticker}"))
+
+    sector = stock.get("sector")
+    if sector:
+        queries.append((f'"{sector}" sector stocks OR "{sector}" industry outlook', None, "sector"))
+
+    return queries
+
+
+def render_related_to(related_to, stock):
+    """Turn related_to tags like ['NVDA', 'holding:AAPL', 'sector'] into Korean labels."""
+    holding_names = {h["ticker"]: h["company"] for h in stock.get("top_holdings", [])}
+    labels = []
+    for tag in related_to:
+        if tag == stock["ticker"]:
+            labels.append(f"{stock['ticker']} 자체")
+        elif tag.startswith("holding:"):
+            h_ticker = tag.split(":", 1)[1]
+            h_company = holding_names.get(h_ticker, h_ticker)
+            labels.append(f"보유종목 {h_ticker}({h_company})")
+        elif tag == "sector":
+            labels.append(f"{stock.get('sector', '섹터')} 섹터")
+        else:
+            labels.append(tag)
+    return ", ".join(labels)
+
+
+def collect_events_for_stock(stock, now):
+    ticker = stock["ticker"]
+    company = stock["company"]
     cutoff = now - timedelta(hours=HOURS_BACK)
+
+    raw = []
+    for query, tier_company, related_to in build_queries_for_stock(stock):
+        label = f"{ticker}:{related_to}"
+        for art in fetch_news_by_query(query, label):
+            art["related_to"] = related_to
+            art["tier_company"] = tier_company
+            raw.append(art)
 
     filtered = []
     for art in raw:
@@ -277,7 +341,7 @@ def collect_for_ticker(ticker, company, now):
             continue
         if is_low_quality(art["title"]):
             continue
-        art["source_tier"] = classify_source_tier(art["source"], company)
+        art["source_tier"] = classify_source_tier(art["source"], art["tier_company"])
         filtered.append(art)
 
     events = cluster_articles(filtered)
@@ -294,6 +358,8 @@ def collect_for_ticker(ticker, company, now):
             "link": ev["link"],
             "primary_source": ev["source"],
             "secondary_sources": ev["secondary_sources"],
+            "related_to": ev["related_to"],
+            "related_to_display": render_related_to(ev["related_to"], stock),
             "published_utc": ev["published"].strftime("%Y-%m-%d %H:%M UTC"),
             "hours_ago": round(hours_ago, 1),
             "pre_importance_score": score,
@@ -353,11 +419,14 @@ def build_ai_input(watchlist, now):
     for stock in watchlist:
         ticker = stock["ticker"]
         company = stock["company"]
-        events = collect_for_ticker(ticker, company, now)
+        events = collect_events_for_stock(stock, now)
         price = fetch_previous_close(ticker)
         tickers_payload.append({
             "ticker": ticker,
             "company": company,
+            "is_etf": stock.get("type") == "etf",
+            "sector": stock.get("sector"),
+            "top_holdings": stock.get("top_holdings", []),
             "previous_close": price,
             "event_count": len(events),
             "events": events,
@@ -395,12 +464,18 @@ COPILOT_PROMPT_TEMPLATE = """\
    "전일 종가: 데이터 조회 실패"라고 쓰고 뉴스 브리핑은 계속 작성하세요.
 6. 같은 사건을 다룬 뉴스는 이미 하나의 이벤트로 합쳐져 있습니다
    (primary_source가 대표 출처, secondary_sources가 추가 출처).
-7. 모든 설명은 한국어로 작성하세요.
+7. is_etf가 true인 종목은 ETF입니다. 이 경우 events 안의 각 뉴스에는
+   related_to_display 필드가 있어서 그 뉴스가 "ETF 자체", "보유종목 중
+   하나(어떤 종목인지 표시됨)", "섹터 전반" 중 무엇과 관련있는지 알려줍니다.
+   각 뉴스의 "한줄 요약" 앞이나 별도 항목으로 이 관련성을 한국어로 표시하세요
+   (예: "[관련: 보유종목 NVDA(NVIDIA)]").
+8. 모든 설명은 한국어로 작성하세요.
 
 [각 뉴스 이벤트마다 포함할 항목]
 - 제목(한국어로 번역/요약)
 - 중요도: N/100
 - 방향성: 부호 (레이블)
+- 관련 (ETF인 경우만: ETF 자체 / 보유종목 / 섹터 중 어느 것인지)
 - 한줄 요약
 - 투자 코멘트
 - 주가 영향
@@ -456,7 +531,10 @@ def build_fallback_briefing(ai_input):
     sections.append("")
 
     for stock in ai_input["tickers"]:
-        sections.append(f"## {stock['ticker']} - {stock['company']}")
+        header = f"## {stock['ticker']} - {stock['company']}"
+        if stock["is_etf"]:
+            header += f" (ETF · {stock['sector']} 섹터)" if stock["sector"] else " (ETF)"
+        sections.append(header)
         sections.append(format_price_line(stock["previous_close"]))
         sections.append("")
 
@@ -470,6 +548,8 @@ def build_fallback_briefing(ai_input):
             sections.append(f"### {idx}. {event['title']}")
             sections.append(f"- 중요도: {event['pre_importance_score']}/100")
             sections.append(f"- 방향성: {sign}{event['pre_direction']} ({event['pre_direction_label']})")
+            if stock["is_etf"]:
+                sections.append(f"- 관련: {event['related_to_display']}")
             sections.append("- 한줄 요약: (Copilot 미사용 - 원문 제목 참고)")
             sections.append("- 투자 코멘트: 추가 확인 필요")
             sections.append("- 주가 영향: 추가 확인 필요")
