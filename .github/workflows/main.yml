@@ -36,7 +36,7 @@ jobs:
           fi
           npm install -g @github/copilot
 
-      - name: Run Copilot CLI when available
+      - name: Run Copilot CLI once per ticker when available
         continue-on-error: true
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.MODELS_TOKEN }}
@@ -46,13 +46,28 @@ jobs:
             exit 0
           fi
 
-          copilot -p "$(cat output/copilot_prompt.txt)" --no-ask-user > output/copilot_briefing.md
+          # One combined prompt covering every ticker was too big for the
+          # CLI to read in a single pass, so each ticker gets its own
+          # invocation over its own small data file (see news_collector.py).
+          : > output/copilot_briefing.md
+          first=1
+          while IFS= read -r ticker; do
+            [ -z "$ticker" ] && continue
+            echo "--- Copilot: $ticker ---"
+            if [ "$first" -eq 0 ]; then
+              printf '\n---\n\n' >> output/copilot_briefing.md
+            fi
+            first=0
+            if ! copilot -p "$(cat "output/prompts/${ticker}.txt")" --no-ask-user >> output/copilot_briefing.md; then
+              echo "Copilot failed for $ticker -- its section will be missing from the AI briefing." >&2
+            fi
+          done < output/ticker_order.txt
 
           if [ -s output/copilot_briefing.md ]; then
             cp output/copilot_briefing.md output/briefing.md
-            echo "Copilot briefing generated."
+            echo "Copilot briefing generated (per-ticker)."
           else
-            echo "Copilot returned no briefing. Keeping fallback."
+            echo "Copilot returned no briefing for any ticker. Keeping fallback."
           fi
 
       - name: Show final briefing

@@ -2,11 +2,18 @@
 Collects recent news for every entry in config/watchlist.json, removes
 duplicate coverage of the same event, pre-scores each remaining event
 (0-100 importance, -3..+3 direction), attaches the previous day's closing
-price/change, and writes three files under output/:
+price/change, and writes these under output/:
 
-  - ai_input.json        structured data handed to the AI
-  - copilot_prompt.txt   instructions + ai_input.json for the Copilot CLI
-  - briefing.md          zero-cost rule-based fallback briefing
+  - ai_input.json         all tickers combined, for reference/debugging
+  - tickers/{TICKER}.json one ticker's data each -- what the AI actually reads
+  - prompts/{TICKER}.txt  short instructions telling Copilot to read that file
+  - ticker_order.txt      ticker list in watchlist order, one per line
+  - briefing.md           zero-cost rule-based fallback briefing
+
+The workflow invokes the Copilot CLI once per ticker (see ticker_order.txt),
+each time pointed at just that ticker's small file, and concatenates the
+results. A single combined file covering every ticker was too large for the
+CLI's file-reading tool to get through in one pass.
 
 A watchlist entry can be a plain stock ({"ticker","company"}) or an ETF
 ({"ticker","company","type":"etf","sector":...,"top_holdings":[...]}). For
@@ -451,44 +458,53 @@ def format_price_line(previous_close):
     return f"전일 종가: ${previous_close['close']} ({sign}{previous_close['change_pct']}%)"
 
 
-COPILOT_PROMPT_TEMPLATE = """\
+# One Copilot invocation handles ONE ticker's data file, not the whole
+# watchlist. A single combined file (dozens of tickers, hundreds of events)
+# was too big for the CLI's file-reading tool to digest in one shot -- it
+# had to chunk-read it, lost track partway through, tried to shell out to
+# jq (blocked by --no-ask-user), and gave up asking whether to continue.
+# Scoping each run to one ticker's file keeps every read small enough to
+# finish in a single pass, however many tickers or events exist in total.
+TICKER_PROMPT_TEMPLATE = """\
 당신은 미국 주식 투자자를 위한 한국어 뉴스 브리핑 작성자입니다. 이 실행은
 사람이 지켜보지 않는 자동화된 배치 작업입니다. 대화가 아니므로, 중간에
 멈춰서 "계속 원하시면 요청해주세요" 같은 말을 하거나 다음 지시를 기다려서는
-안 됩니다. 한 번의 응답으로 전체 작업을 끝까지 완료하세요.
+안 됩니다. 한 번의 응답으로 이 종목 하나의 브리핑을 끝까지 완료하세요.
 
-이 저장소 안의 {news_data_path} 파일을 먼저 읽으세요. 그 JSON 파일에 오늘
-수집된 모든 뉴스 데이터가 들어 있습니다. 이 지시문에는 뉴스 데이터를 직접
-넣지 않았으니, 반드시 그 파일을 읽어서 사용하세요.
+이 저장소 안의 {ticker_data_path} 파일을 먼저 읽으세요. 그 JSON 파일에는
+{ticker}({company}) 이 종목 하나에 대해 오늘 수집된 뉴스 데이터가 들어
+있습니다. 이 지시문에는 뉴스 데이터를 직접 넣지 않았으니, 반드시 그 파일을
+읽어서 사용하세요.
 
 [반드시 지켜야 할 규칙]
-0. tickers 배열에 있는 종목을 하나도 빠뜨리지 말고 전부, 끝까지 작성하세요.
-   이벤트가 많은 종목이 있어도 요약해서 건너뛰거나 "나머지는 요청하시면
-   작성하겠습니다"라고 미루지 마세요. 이벤트 수가 많으면 각 항목의 문장을
-   짧게 줄여서(투자 코멘트/주가 영향 각 1문장) 분량을 조절하되, 종목과
-   이벤트 자체는 절대 빠뜨리지 마세요. 완결성이 상세함보다 우선입니다.
-1. {news_data_path} 파일에 들어있는 뉴스만 사용하세요. 그 파일에 없는 사실을
-   지어내지 마세요. 확실하지 않은 부분은 "추가 확인 필요"라고 쓰세요.
-2. 특정 중요도 이상만 보여주는 컷은 없습니다. 각 종목의 events 배열에
-   있는 뉴스를 하나도 빠짐없이 전부 포함하세요.
+0. events 배열에 있는 뉴스를 하나도 빠뜨리지 말고 전부, 끝까지 작성하세요.
+   이벤트가 많아도 요약해서 건너뛰거나 "나머지는 요청하시면 작성하겠습니다"
+   라고 미루지 마세요. 이벤트 수가 많으면 각 항목의 문장을 짧게 줄여서
+   (투자 코멘트/주가 영향 각 1문장) 분량을 조절하되, 이벤트 자체는 절대
+   빠뜨리지 마세요. 완결성이 상세함보다 우선입니다.
+1. {ticker_data_path} 파일에 들어있는 뉴스만 사용하세요. 그 파일에 없는
+   사실을 지어내지 마세요. 확실하지 않은 부분은 "추가 확인 필요"라고
+   쓰세요.
+2. 특정 중요도 이상만 보여주는 컷은 없습니다. events 배열에 있는 뉴스를
+   하나도 빠짐없이 전부 포함하세요.
 3. 각 뉴스마다 당신이 최종 판단한 중요도(0~100)와 방향성(-3~+3)을
    부여하고, 그 중요도가 높은 순서로 정렬해서 보여주세요.
    (JSON의 pre_importance_score/pre_direction은 참고용 초기값입니다.
    내용을 보고 필요하면 조정하세요.)
 4. 방향성 표기: +3 강한 호재, +2 호재, +1 약한 호재, 0 중립,
    -1 약한 악재, -2 악재, -3 강한 악재.
-5. 각 종목 섹션 맨 위에는 previous_close 정보를 이용해 전일 종가와
-   전일 등락률을 보여주세요. previous_close가 null이면
-   "전일 종가: 데이터 조회 실패"라고 쓰고 뉴스 브리핑은 계속 작성하세요.
+5. 맨 위에는 previous_close 정보를 이용해 전일 종가와 전일 등락률을
+   보여주세요. previous_close가 null이면 "전일 종가: 데이터 조회 실패"
+   라고 쓰고 브리핑은 계속 작성하세요.
 6. 같은 사건을 다룬 뉴스는 이미 하나의 이벤트로 합쳐져 있습니다
    (primary_source가 대표 출처, secondary_sources가 추가 출처).
-7. is_etf가 true인 종목은 ETF입니다. 이 경우 events 안의 각 뉴스에는
+7. is_etf가 true이면 이 종목은 ETF입니다. 이 경우 events 안의 각 뉴스에는
    related_to_display 필드가 있어서 그 뉴스가 "ETF 자체", "보유종목 중
    하나(어떤 종목인지 표시됨)", "섹터 전반" 중 무엇과 관련있는지 알려줍니다.
-   각 뉴스의 "한줄 요약" 앞이나 별도 항목으로 이 관련성을 한국어로 표시하세요
-   (예: "[관련: 보유종목 NVDA(NVIDIA)]").
+   각 뉴스의 "한줄 요약" 앞이나 별도 항목으로 이 관련성을 한국어로
+   표시하세요 (예: "[관련: 보유종목 NVDA(NVIDIA)]").
 8. 모든 설명은 한국어로 작성하세요.
-9. 원문 링크는 {news_data_path} 파일의 link 값을 한 글자도 빠뜨리지 말고
+9. 원문 링크는 {ticker_data_path} 파일의 link 값을 한 글자도 빠뜨리지 말고
    그대로 출력하세요. 길다고 줄이거나 "..."으로 자르지 마세요 -- 한 글자만
    잘려도 링크가 깨져서 클릭할 수 없게 됩니다.
 
@@ -511,7 +527,7 @@ COPILOT_PROMPT_TEMPLATE = """\
 전일 종가: $182.35 (+2.41%)
 
 ## 핵심 요약
-(전체 뉴스 흐름에 대한 2~3문장 요약)
+(이 종목 전체 뉴스 흐름에 대한 2~3문장 요약)
 
 ## 주요 뉴스
 
@@ -529,23 +545,21 @@ COPILOT_PROMPT_TEMPLATE = """\
 ### 2. (다음 뉴스, 중요도 내림차순으로 계속)
 ...
 
-여러 종목이 있으면 종목별로 위 형식을 반복하고 "---"로 구분하세요.
-
 다시 한번 강조합니다:
-- 뉴스 데이터는 이 지시문 안이 아니라 {news_data_path} 파일 안에 있습니다.
-  그 파일을 꼭 읽고 시작하세요.
-- tickers 배열의 모든 종목을 끝까지 다 쓰기 전에는 응답을 마치지 마세요.
+- 뉴스 데이터는 이 지시문 안이 아니라 {ticker_data_path} 파일 안에
+  있습니다. 그 파일을 꼭 읽고 시작하세요.
+- events 배열의 모든 뉴스를 끝까지 다 쓰기 전에는 응답을 마치지 마세요.
   중간에 멈추고 다음 지시를 기다리지 마세요.
 - 원문 링크는 절대 축약/생략하지 말고 전체를 그대로 출력하세요.
 """
 
 
-def build_copilot_prompt(ai_input):
-    first_ticker = ai_input["tickers"][0] if ai_input["tickers"] else {"ticker": "TICKER", "company": "Company"}
-    return COPILOT_PROMPT_TEMPLATE.format(
-        ticker=first_ticker["ticker"],
-        company=first_ticker["company"],
-        news_data_path="output/ai_input.json",
+def build_ticker_prompt(ticker_payload):
+    ticker = ticker_payload["ticker"]
+    return TICKER_PROMPT_TEMPLATE.format(
+        ticker=ticker,
+        company=ticker_payload["company"],
+        ticker_data_path=f"output/tickers/{ticker}.json",
     )
 
 
@@ -596,14 +610,29 @@ def main():
     watchlist = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
 
     OUTPUT_DIR.mkdir(exist_ok=True)
+    tickers_dir = OUTPUT_DIR / "tickers"
+    prompts_dir = OUTPUT_DIR / "prompts"
+    tickers_dir.mkdir(exist_ok=True)
+    prompts_dir.mkdir(exist_ok=True)
 
     ai_input = build_ai_input(watchlist, now)
     (OUTPUT_DIR / "ai_input.json").write_text(
         json.dumps(ai_input, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    prompt = build_copilot_prompt(ai_input)
-    (OUTPUT_DIR / "copilot_prompt.txt").write_text(prompt, encoding="utf-8")
+    ticker_order = []
+    for ticker_payload in ai_input["tickers"]:
+        ticker = ticker_payload["ticker"]
+        ticker_order.append(ticker)
+
+        (tickers_dir / f"{ticker}.json").write_text(
+            json.dumps(ticker_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (prompts_dir / f"{ticker}.txt").write_text(
+            build_ticker_prompt(ticker_payload), encoding="utf-8"
+        )
+
+    (OUTPUT_DIR / "ticker_order.txt").write_text("\n".join(ticker_order) + "\n", encoding="utf-8")
 
     fallback = build_fallback_briefing(ai_input)
     (OUTPUT_DIR / "briefing.md").write_text(fallback, encoding="utf-8")
