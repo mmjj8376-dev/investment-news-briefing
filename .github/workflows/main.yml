@@ -2,6 +2,9 @@ name: Test News Collector
 
 on:
   workflow_dispatch:
+  schedule:
+    # 22:00 UTC = 07:00 KST (Korea has no DST, so this offset never changes)
+    - cron: "0 22 * * *"
 
 permissions:
   contents: read
@@ -77,3 +80,21 @@ jobs:
           cat output/briefing.md
           echo
           cat output/briefing.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Get today's date (Asia/Seoul)
+        if: always()
+        id: kst_date
+        run: echo "today=$(TZ='Asia/Seoul' date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Email the briefing
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.GMAIL_ADDRESS }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "투자 뉴스 브리핑 - ${{ steps.kst_date.outputs.today }}"
+          to: mmjj8376@poba.or.kr
+          from: 투자 뉴스 브리핑 <${{ secrets.GMAIL_ADDRESS }}>
+          body: file://output/briefing.md
