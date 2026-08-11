@@ -306,7 +306,9 @@ def remove_near_duplicates(articles, threshold=0.82):
 
         existing = unique_articles[duplicate_index]
 
-        if source_score(article["source"]) > source_score(existing["source"]):
+        if source_score(article["source"]) > source_score(
+            existing["source"]
+        ):
             unique_articles[duplicate_index] = article
 
             duplicates.append(
@@ -399,6 +401,64 @@ def cluster_events(articles, threshold=0.48):
     return clusters
 
 
+def cluster_merge_score(cluster_a, cluster_b):
+    best_score = 0
+
+    for article_a in cluster_a["articles"]:
+        for article_b in cluster_b["articles"]:
+            score = event_similarity(
+                article_a,
+                article_b,
+            )
+
+            if score > best_score:
+                best_score = score
+
+    return best_score
+
+
+def merge_event_clusters(clusters, threshold=0.60):
+    merged = []
+
+    for cluster in clusters:
+        matched_index = None
+
+        for index, existing in enumerate(merged):
+            score = cluster_merge_score(
+                cluster,
+                existing,
+            )
+
+            if score >= threshold:
+                matched_index = index
+                break
+
+        if matched_index is None:
+            merged.append(
+                {
+                    "representative": cluster["representative"],
+                    "articles": list(cluster["articles"]),
+                }
+            )
+            continue
+
+        existing = merged[matched_index]
+
+        existing["articles"].extend(
+            cluster["articles"]
+        )
+
+        current_rep = existing["representative"]
+        new_rep = cluster["representative"]
+
+        if source_score(new_rep["source"]) > source_score(
+            current_rep["source"]
+        ):
+            existing["representative"] = new_rep
+
+    return merged
+
+
 def print_article(index, article):
     print(f"[{index}] {article['title']}")
     print(f"Source: {article['source']}")
@@ -428,9 +488,13 @@ if __name__ == "__main__":
         deduplicated_news
     )
 
+    merged_clusters = merge_event_clusters(
+        event_clusters
+    )
+
     representatives = [
         cluster["representative"]
-        for cluster in event_clusters
+        for cluster in merged_clusters
     ]
 
     representatives.sort(
@@ -445,7 +509,8 @@ if __name__ == "__main__":
     print(f"Raw articles:             {len(raw_news)}")
     print(f"Low-value removed:        {len(low_value_removed)}")
     print(f"Near-duplicates removed:  {len(duplicates_removed)}")
-    print(f"Event clusters:           {len(event_clusters)}")
+    print(f"First-pass clusters:      {len(event_clusters)}")
+    print(f"Merged event clusters:    {len(merged_clusters)}")
     print(f"Remaining for AI review:  {len(representatives)}")
 
     if duplicates_removed:
@@ -467,11 +532,11 @@ if __name__ == "__main__":
 
             print()
 
-    print("\nEVENT CLUSTERS")
+    print("\nMERGED EVENT CLUSTERS")
     print("-" * 70)
 
     large_clusters = sorted(
-        event_clusters,
+        merged_clusters,
         key=lambda cluster: len(cluster["articles"]),
         reverse=True,
     )
@@ -493,7 +558,7 @@ if __name__ == "__main__":
             f"{representative['title']}"
         )
 
-        for article in cluster["articles"][:8]:
+        for article in cluster["articles"][:10]:
             print(
                 f"  - {article['source']} | "
                 f"{article['title']}"
