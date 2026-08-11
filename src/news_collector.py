@@ -24,7 +24,7 @@ GITHUB_MODELS_URL = (
     "https://models.github.ai/inference/chat/completions"
 )
 
-MODEL = "openai/gpt-4o"
+MODEL = "openai/gpt-4.1"
 
 
 LOW_VALUE_PHRASES = [
