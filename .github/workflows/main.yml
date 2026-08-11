@@ -3,8 +3,11 @@ name: Test News Collector
 on:
   workflow_dispatch:
   schedule:
-    # 22:00 UTC = 07:00 KST (Korea has no DST, so this offset never changes)
-    - cron: "0 22 * * *"
+    # 22:07 UTC = 07:07 KST (Korea has no DST, so this offset never changes).
+    # Deliberately NOT on the hour -- GitHub's own docs warn that
+    # top-of-the-hour is when scheduled workflows are most likely to be
+    # delayed or dropped under load, since everyone else schedules there too.
+    - cron: "7 22 * * *"
 
 permissions:
   contents: read
