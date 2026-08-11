@@ -1,23 +1,73 @@
-{
-  "stocks": [
-    "AAPL",
-    "AVGO",
-    "GOOGL",
-    "LLY",
-    "META",
-    "MSFT",
-    "NVDA",
-    "TSLA"
-  ],
-  "etfs": [
-    "BOTZ",
-    "GRID",
-    "IBB",
-    "ITA",
-    "KBWB",
-    "NLR",
-    "PAVE",
-    "SMH",
-    "XLK"
-  ]
-}
+[
+  { "ticker": "AAPL", "company": "Apple" },
+  { "ticker": "AVGO", "company": "Broadcom" },
+  { "ticker": "GOOGL", "company": "Alphabet" },
+  { "ticker": "LLY", "company": "Eli Lilly" },
+  { "ticker": "META", "company": "Meta Platforms" },
+  { "ticker": "MSFT", "company": "Microsoft" },
+  { "ticker": "NVDA", "company": "NVIDIA" },
+  { "ticker": "TSLA", "company": "Tesla" },
+  {
+    "ticker": "BOTZ",
+    "company": "Global X Robotics & Artificial Intelligence ETF",
+    "type": "etf",
+    "sector": "Robotics & AI",
+    "top_holdings": []
+  },
+  {
+    "ticker": "GRID",
+    "company": "First Trust NASDAQ Clean Edge Smart Grid Infrastructure ETF",
+    "type": "etf",
+    "sector": "Smart Grid & Infrastructure",
+    "top_holdings": []
+  },
+  {
+    "ticker": "IBB",
+    "company": "iShares Biotechnology ETF",
+    "type": "etf",
+    "sector": "Biotechnology",
+    "top_holdings": []
+  },
+  {
+    "ticker": "ITA",
+    "company": "iShares U.S. Aerospace & Defense ETF",
+    "type": "etf",
+    "sector": "Aerospace & Defense",
+    "top_holdings": []
+  },
+  {
+    "ticker": "KBWB",
+    "company": "Invesco KBW Bank ETF",
+    "type": "etf",
+    "sector": "Banking",
+    "top_holdings": []
+  },
+  {
+    "ticker": "NLR",
+    "company": "VanEck Uranium+Nuclear Energy ETF",
+    "type": "etf",
+    "sector": "Nuclear & Uranium",
+    "top_holdings": []
+  },
+  {
+    "ticker": "PAVE",
+    "company": "Global X U.S. Infrastructure Development ETF",
+    "type": "etf",
+    "sector": "Infrastructure",
+    "top_holdings": []
+  },
+  {
+    "ticker": "SMH",
+    "company": "VanEck Semiconductor ETF",
+    "type": "etf",
+    "sector": "Semiconductors",
+    "top_holdings": []
+  },
+  {
+    "ticker": "XLK",
+    "company": "Technology Select Sector SPDR Fund",
+    "type": "etf",
+    "sector": "Technology",
+    "top_holdings": []
+  }
+]
