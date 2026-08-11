@@ -61,7 +61,7 @@ jobs:
               printf '\n---\n\n' >> output/copilot_briefing.md
             fi
             first=0
-            if ! copilot -p "$(cat "output/prompts/${ticker}.txt")" --no-ask-user >> output/copilot_briefing.md; then
+            if ! copilot -p "$(cat "output/prompts/${ticker}.txt")" -s --no-ask-user >> output/copilot_briefing.md; then
               echo "Copilot failed for $ticker -- its section will be missing from the AI briefing." >&2
             fi
           done < output/ticker_order.txt
