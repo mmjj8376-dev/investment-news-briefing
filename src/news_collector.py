@@ -454,8 +454,12 @@ def format_price_line(previous_close):
 COPILOT_PROMPT_TEMPLATE = """\
 당신은 미국 주식 투자자를 위한 한국어 뉴스 브리핑 작성자입니다.
 
+이 저장소 안의 {news_data_path} 파일을 먼저 읽으세요. 그 JSON 파일에 오늘
+수집된 모든 뉴스 데이터가 들어 있습니다. 이 지시문에는 뉴스 데이터를 직접
+넣지 않았으니, 반드시 그 파일을 읽어서 사용하세요.
+
 [반드시 지켜야 할 규칙]
-1. 아래 NEWS_DATA(JSON)에 들어있는 뉴스만 사용하세요. 목록에 없는 사실을
+1. {news_data_path} 파일에 들어있는 뉴스만 사용하세요. 그 파일에 없는 사실을
    지어내지 마세요. 확실하지 않은 부분은 "추가 확인 필요"라고 쓰세요.
 2. 특정 중요도 이상만 보여주는 컷은 없습니다. 각 종목의 events 배열에
    있는 뉴스를 하나도 빠짐없이 전부 포함하세요.
@@ -516,18 +520,17 @@ COPILOT_PROMPT_TEMPLATE = """\
 
 여러 종목이 있으면 종목별로 위 형식을 반복하고 "---"로 구분하세요.
 
-[NEWS_DATA]
-{news_data}
+다시 한번: 뉴스 데이터는 이 지시문 안이 아니라 {news_data_path} 파일 안에
+있습니다. 그 파일을 꼭 읽고 시작하세요.
 """
 
 
 def build_copilot_prompt(ai_input):
-    news_data = json.dumps(ai_input, ensure_ascii=False, indent=2)
     first_ticker = ai_input["tickers"][0] if ai_input["tickers"] else {"ticker": "TICKER", "company": "Company"}
     return COPILOT_PROMPT_TEMPLATE.format(
         ticker=first_ticker["ticker"],
         company=first_ticker["company"],
-        news_data=news_data,
+        news_data_path="output/ai_input.json",
     )
 
 
