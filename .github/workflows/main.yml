@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: read
-  models: read
 
 jobs:
   run-news-test:
@@ -13,14 +12,53 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Run news collector and AI analysis
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Collect, deduplicate, and pre-score news
         run: python src/news_collector.py
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+
+      - name: Install Copilot CLI only when a Copilot token exists
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "PERSONAL_ACCESS_TOKEN is not configured."
+            echo "Skipping Copilot CLI. The zero-cost rule-based fallback will be used."
+            exit 0
+          fi
+          npm install -g @github/copilot
+
+      - name: Run Copilot CLI when available
+        continue-on-error: true
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "Copilot token not present. Keeping output/briefing.md fallback."
+            exit 0
+          fi
+
+          copilot -p "$(cat output/copilot_prompt.txt)" --no-ask-user > output/copilot_briefing.md
+
+          if [ -s output/copilot_briefing.md ]; then
+            cp output/copilot_briefing.md output/briefing.md
+            echo "Copilot briefing generated."
+          else
+            echo "Copilot returned no briefing. Keeping fallback."
+          fi
+
+      - name: Show final briefing
+        if: always()
+        run: |
+          echo "===== FINAL BRIEFING ====="
+          cat output/briefing.md
+          echo
+          cat output/briefing.md >> "$GITHUB_STEP_SUMMARY"
