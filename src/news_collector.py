@@ -380,29 +380,35 @@ def collect_events_for_stock(stock, now):
 
 # ---------------------------------------------------------------------------
 # Previous close / change -- must never raise, only ever return None
+#
+# Stooq's CSV export now sits behind a JavaScript bot-check page, so a plain
+# urllib GET no longer gets real data from it. Yahoo Finance's public chart
+# endpoint returns JSON directly and needs no auth, so that's used instead.
 # ---------------------------------------------------------------------------
 def fetch_previous_close(ticker):
-    url = f"https://stooq.com/q/d/l/?s={urllib.parse.quote(ticker.lower())}.us&i=d"
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}"
+        "?range=5d&interval=1d"
+    )
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            text = resp.read().decode("utf-8", errors="ignore")
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
 
-        lines = [line for line in text.strip().splitlines() if line.strip()]
-        if len(lines) < 3:
+        result = payload["chart"]["result"][0]
+        closes = result["indicators"]["quote"][0]["close"]
+        timestamps = result["timestamp"]
+        pairs = [(ts, c) for ts, c in zip(timestamps, closes) if c is not None]
+        if len(pairs) < 2:
             return None
 
-        rows = lines[1:]  # drop header
-        last_cols = rows[-1].split(",")
-        prev_cols = rows[-2].split(",")
-        last_close = float(last_cols[4])
-        prev_close = float(prev_cols[4])
+        (_, prev_close), (last_ts, last_close) = pairs[-2], pairs[-1]
         if prev_close == 0:
             return None
 
         change_pct = (last_close - prev_close) / prev_close * 100
         return {
-            "date": last_cols[0],
+            "date": datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%d"),
             "close": round(last_close, 2),
             "change_pct": round(change_pct, 2),
         }
