@@ -135,3 +135,117 @@ jobs:
           from: 투자 뉴스 브리핑 <${{ secrets.GMAIL_ADDRESS }}>
           body: file://output/briefing.md
           html_body: file://output/briefing.html
+
+      # ---------------------------------------------------------------
+      # Second email: a neutral macro news summary plus a short, non-
+      # directive synthesis of today's news for each holding. This never
+      # contains a buy/sell/hold call -- see MACRO_PROMPT_TEMPLATE and
+      # PORTFOLIO_SYNTHESIS_TEMPLATE in news_collector.py for why.
+      # ---------------------------------------------------------------
+      - name: Run Copilot CLI for macro summary
+        if: always()
+        continue-on-error: true
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MODELS_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            cp output/fallback/macro.md output/macro_summary.md
+            echo "Copilot token not present. Using rule-based macro fallback."
+            exit 0
+          fi
+
+          macro_stderr="$(mktemp)"
+          if copilot -p "$(cat output/prompts/macro.txt)" -s --no-ask-user \
+               > output/macro_summary.md 2> "$macro_stderr"; then
+            macro_exit=0
+          else
+            macro_exit=$?
+          fi
+          byte_count=$(wc -c < output/macro_summary.md | tr -d ' ')
+
+          if [ "$macro_exit" -ne 0 ] || [ "$byte_count" -le 80 ]; then
+            echo "Copilot failed or returned nothing usable for the macro summary (exit=$macro_exit, ${byte_count} bytes) -- using rule-based fallback." >&2
+            echo "----- copilot stderr for macro summary -----" >&2
+            cat "$macro_stderr" >&2
+            cp output/fallback/macro.md output/macro_summary.md
+          fi
+          rm -f "$macro_stderr"
+
+      - name: Run Copilot CLI for per-holding neutral synthesis
+        if: always()
+        continue-on-error: true
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.MODELS_TOKEN }}
+        run: |
+          : > output/portfolio_synthesis.md
+
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "Copilot token not present. Using rule-based synthesis fallback for every ticker."
+            while IFS= read -r ticker; do
+              [ -z "$ticker" ] && continue
+              cat "output/fallback/synthesis_${ticker}.md" >> output/portfolio_synthesis.md
+              printf '\n' >> output/portfolio_synthesis.md
+            done < output/ticker_order.txt
+            exit 0
+          fi
+
+          while IFS= read -r ticker; do
+            [ -z "$ticker" ] && continue
+            echo "--- Synthesis: $ticker ---"
+
+            ticker_output="$(mktemp)"
+            ticker_stderr="$(mktemp)"
+            if copilot -p "$(cat "output/prompts/synthesis_${ticker}.txt")" -s --no-ask-user \
+                 > "$ticker_output" 2> "$ticker_stderr"; then
+              copilot_exit=0
+            else
+              copilot_exit=$?
+            fi
+            byte_count=$(wc -c < "$ticker_output" | tr -d ' ')
+
+            if [ "$copilot_exit" -eq 0 ] && [ "$byte_count" -gt 40 ] && grep -qi "$ticker" "$ticker_output"; then
+              cat "$ticker_output" >> output/portfolio_synthesis.md
+            else
+              echo "Copilot failed or returned nothing usable for $ticker synthesis (exit=$copilot_exit, ${byte_count} bytes) -- using rule-based fallback for this ticker." >&2
+              echo "----- copilot stderr for $ticker synthesis -----" >&2
+              cat "$ticker_stderr" >&2
+              cat "output/fallback/synthesis_${ticker}.md" >> output/portfolio_synthesis.md
+            fi
+            printf '\n' >> output/portfolio_synthesis.md
+            rm -f "$ticker_output" "$ticker_stderr"
+          done < output/ticker_order.txt
+
+      - name: Assemble portfolio digest
+        if: always()
+        run: |
+          {
+            cat output/macro_summary.md
+            echo
+            echo "---"
+            echo
+            echo "# 보유 종목 뉴스 종합 (참고용 -- 매수/매도 추천 아님)"
+            echo
+            cat output/portfolio_synthesis.md
+          } > output/portfolio_digest.md
+          echo "===== PORTFOLIO DIGEST ====="
+          cat output/portfolio_digest.md
+          echo
+          cat output/portfolio_digest.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render portfolio digest to HTML
+        if: always()
+        run: python src/render_email_html.py output/portfolio_digest.md output/portfolio_digest.html
+
+      - name: Email the portfolio digest
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.GMAIL_ADDRESS }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "매크로 · 보유종목 브리핑 - ${{ steps.kst_date.outputs.today }}"
+          to: mmjj8376@poba.or.kr
+          from: 매크로 브리핑 <${{ secrets.GMAIL_ADDRESS }}>
+          body: file://output/portfolio_digest.md
+          html_body: file://output/portfolio_digest.html

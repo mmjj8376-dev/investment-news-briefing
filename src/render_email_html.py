@@ -1,19 +1,24 @@
 """
-Converts output/briefing.md (whichever briefing ended up there -- Copilot's
-or the rule-based fallback) into output/briefing.html so links are actual
-clickable <a> tags. Some mail clients (including corporate webmail) don't
+Converts a markdown briefing file into an HTML file with real clickable
+<a> tags. Some mail clients (including corporate webmail) don't
 auto-linkify bare URLs in a plain-text email body, which left every "원문
-링크: https://..." line unclickable -- this runs after the briefing is
-final and before the email step, so the email can carry both a plain-text
-body and this HTML version.
+링크: https://..." line unclickable -- this runs after a briefing is final
+and before its email step, so the email can carry both a plain-text body
+and this HTML version.
+
+Usage: python render_email_html.py [source.md] [dest.html]
+Defaults to output/briefing.md -> output/briefing.html (the main daily
+briefing) when called with no arguments; the second ("매크로 · 보유종목")
+email passes its own paths explicitly.
 """
 import html
 import re
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-SRC = BASE_DIR / "output" / "briefing.md"
-DEST = BASE_DIR / "output" / "briefing.html"
+DEFAULT_SRC = BASE_DIR / "output" / "briefing.md"
+DEFAULT_DEST = BASE_DIR / "output" / "briefing.html"
 
 URL_PATTERN = re.compile(r"(https?://[^\s<]+)")
 
@@ -79,8 +84,10 @@ def render(markdown_text):
 
 
 def main():
-    markdown_text = SRC.read_text(encoding="utf-8") if SRC.exists() else ""
-    DEST.write_text(render(markdown_text), encoding="utf-8")
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_SRC
+    dest = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_DEST
+    markdown_text = src.read_text(encoding="utf-8") if src.exists() else ""
+    dest.write_text(render(markdown_text), encoding="utf-8")
 
 
 if __name__ == "__main__":

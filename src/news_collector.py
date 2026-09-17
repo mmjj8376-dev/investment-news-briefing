@@ -4,16 +4,33 @@ duplicate coverage of the same event, pre-scores each remaining event
 (0-100 importance, -3..+3 direction), attaches the previous day's closing
 price/change, and writes these under output/:
 
-  - ai_input.json         all tickers combined, for reference/debugging
-  - tickers/{TICKER}.json one ticker's data each -- what the AI actually reads
-  - prompts/{TICKER}.txt  short instructions telling Copilot to read that file
-  - ticker_order.txt      ticker list in watchlist order, one per line
-  - briefing.md           zero-cost rule-based fallback briefing
+  - ai_input.json           all tickers combined, for reference/debugging
+  - tickers/{TICKER}.json   one ticker's data each -- what the AI actually reads
+  - prompts/{TICKER}.txt    instructions for the main per-ticker briefing
+  - prompts/synthesis_{T}.txt  instructions for the short neutral per-ticker
+                            synthesis used in the second ("매크로 · 보유종목")
+                            email -- see PORTFOLIO_SYNTHESIS_TEMPLATE
+  - macro.json              today's macro/economic news (not ticker-specific)
+  - prompts/macro.txt        instructions for the macro summary email section
+  - ticker_order.txt        ticker list in watchlist order, one per line
+  - briefing.md             zero-cost rule-based fallback briefing
+  - fallback/{TICKER}.md, fallback/synthesis_{T}.md, fallback/macro.md
+                            per-item rule-based fallbacks the workflow
+                            substitutes in when Copilot fails for just
+                            that one item
 
 The workflow invokes the Copilot CLI once per ticker (see ticker_order.txt),
 each time pointed at just that ticker's small file, and concatenates the
 results. A single combined file covering every ticker was too large for the
-CLI's file-reading tool to get through in one pass.
+CLI's file-reading tool to get through in one pass. The second email's
+per-ticker synthesis and macro summary follow the same one-call-per-item
+pattern for the same reason.
+
+The second email (macro summary + per-holding synthesis) is intentionally
+never allowed to contain a buy/sell/hold call or any other personalized
+trading instruction -- see PORTFOLIO_SYNTHESIS_TEMPLATE and
+MACRO_PROMPT_TEMPLATE. It summarizes what happened; it does not tell the
+reader what to do about it.
 
 A watchlist entry can be a plain stock ({"ticker","company"}) or an ETF
 ({"ticker","company","type":"etf","sector":...,"top_holdings":[...]}). For
@@ -434,6 +451,64 @@ def collect_events_for_stock(stock, now):
 
 
 # ---------------------------------------------------------------------------
+# Macro / economic news -- not tied to any one ticker. Used for the second
+# "매크로 · 보유종목" email, which is a neutral news digest, never a trade
+# recommendation (see PORTFOLIO_SYNTHESIS_TEMPLATE below for why).
+# ---------------------------------------------------------------------------
+MACRO_QUERIES = [
+    ('"Federal Reserve" OR FOMC OR "interest rate decision"', "fed"),
+    ('"CPI report" OR inflation OR "PCE inflation"', "inflation"),
+    ('"jobs report" OR unemployment OR "non-farm payrolls"', "jobs"),
+    ('GDP OR "economic growth" OR recession', "growth"),
+    ('"stock market today" OR "Wall Street" OR "S&P 500"', "market"),
+]
+
+
+def collect_macro_events(now):
+    cutoff = now - timedelta(hours=HOURS_BACK)
+
+    raw = []
+    for query, tag in MACRO_QUERIES:
+        for art in fetch_news_by_query(query, f"macro:{tag}"):
+            art["related_to"] = tag
+            art["tier_company"] = None
+            raw.append(art)
+
+    filtered = []
+    for art in raw:
+        if art["published"] < cutoff:
+            continue
+        if is_low_quality(art["title"]):
+            continue
+        art["source_tier"] = classify_source_tier(art["source"], None)
+        filtered.append(art)
+
+    events = cluster_articles(filtered)
+
+    scored = []
+    for ev in events:
+        hours_ago = (now - ev["published"]).total_seconds() / 3600
+        score, breakdown = compute_pre_score(ev, hours_ago)
+        direction = compute_direction(ev)
+        scored.append({
+            "title": ev["title"],
+            "link": ev["link"],
+            "primary_source": ev["source"],
+            "secondary_sources": ev["secondary_sources"],
+            "related_to": ev["related_to"],
+            "published_utc": ev["published"].strftime("%Y-%m-%d %H:%M UTC"),
+            "hours_ago": round(hours_ago, 1),
+            "pre_importance_score": score,
+            "pre_score_breakdown": breakdown,
+            "pre_direction": direction,
+            "pre_direction_label": DIRECTION_LABELS[direction],
+        })
+
+    scored.sort(key=lambda e: e["pre_importance_score"], reverse=True)
+    return scored
+
+
+# ---------------------------------------------------------------------------
 # Previous close / change -- must never raise, only ever return None
 #
 # Stooq's CSV export now sits behind a JavaScript bot-check page, so a plain
@@ -620,6 +695,104 @@ def build_ticker_prompt(ticker_payload):
     )
 
 
+# ---------------------------------------------------------------------------
+# Second email: a neutral macro summary + a short, non-directive synthesis
+# per holding. Neither of these may ever contain a buy/sell/hold call or
+# any other personalized trading instruction -- that crosses into
+# personalized investment advice, which this pipeline does not provide.
+# They summarize what happened; the reader decides what it means for them.
+# ---------------------------------------------------------------------------
+MACRO_PROMPT_TEMPLATE = """\
+당신은 매크로 경제 뉴스를 정리하는 한국어 브리핑 작성자입니다. 이 실행은
+사람이 지켜보지 않는 자동화된 배치 작업입니다. 중간에 멈추지 말고 한 번에
+끝까지 작성하세요.
+
+이 저장소 안의 {macro_data_path} 파일을 읽으세요. 오늘 수집된 미국/글로벌
+매크로 경제 뉴스(금리, 물가, 고용, 성장률, 시장 전반 동향 등)가 events
+배열에 들어 있습니다.
+
+[반드시 지켜야 할 규칙]
+1. {macro_data_path} 파일에 있는 뉴스만 사용하세요. 없는 사실을 지어내지
+   마세요. 확실하지 않으면 "추가 확인 필요"라고 쓰세요.
+2. 특정 종목이나 자산에 대한 매수/매도/홀딩 추천, 투자 지시는 절대 하지
+   마세요 -- 이건 시장 전반 매크로 뉴스 요약이지 투자 자문이 아닙니다.
+3. events 배열의 이벤트를 하나도 빠뜨리지 말고 반영하되, 개별 나열보다는
+   아래 주제별로 묶어서 정리하세요.
+4. 원문 링크는 절대 줄이거나 "..."으로 자르지 말고 그대로 출력하세요.
+5. 한국어로 작성하세요.
+
+[출력 형식]
+# 매크로 · 경제지표 브리핑
+
+## 핵심 요약
+(오늘 매크로 뉴스 흐름을 2~4문장으로 요약)
+
+## 금리 · 통화정책
+## 물가 · 인플레이션
+## 고용
+## 성장 · 경기
+## 시장 전반
+
+각 섹션마다, 관련 뉴스가 있으면 이벤트별로:
+- 한줄 요약
+- 대표 출처
+- 기사 시간
+- 원문 링크
+
+관련 뉴스가 없는 섹션은 "관련 뉴스 없음"이라고만 쓰세요.
+
+다시 한번 강조합니다: {macro_data_path} 파일을 꼭 읽고 시작하고, 매수/매도
+추천은 절대 하지 말고, events의 모든 이벤트를 빠짐없이 반영하세요.
+"""
+
+
+def build_macro_prompt():
+    return MACRO_PROMPT_TEMPLATE.format(macro_data_path="output/macro.json")
+
+
+PORTFOLIO_SYNTHESIS_TEMPLATE = """\
+당신은 보유 종목에 대한 오늘의 뉴스를 중립적으로 요약하는 한국어 작성자
+입니다. 이 실행은 자동화된 배치 작업이니 중간에 멈추지 마세요.
+
+이 저장소 안의 {ticker_data_path} 파일을 읽으세요. {ticker}({company})에
+대해 오늘 수집된 뉴스 데이터가 들어 있습니다.
+
+[반드시 지켜야 할 규칙 -- 매우 중요]
+1. "매수", "매도", "홀딩", "추천", "비중 확대/축소" 같은 투자 판단이나
+   지시는 절대 쓰지 마세요. 이건 투자 자문이 아니라, 오늘 이 종목에
+   어떤 뉴스가 있었고 그게 대체로 긍정적이었는지 부정적이었는지를
+   사실 기반으로 요약하는 것입니다. 최종 판단은 전적으로 읽는 사람의
+   몫이며, 당신은 그 판단을 대신 내리면 안 됩니다.
+2. {ticker_data_path} 파일에 있는 뉴스만 사용하고 없는 사실을 지어내지
+   마세요.
+3. events 배열이 비어 있으면 "오늘 수집된 뉴스 없음"이라고만 쓰세요.
+4. previous_close의 실제 종가·등락률 숫자를 언급하세요. null이면
+   "전일 가격 데이터 없음"이라고 쓰세요.
+5. 개별 기사를 하나하나 나열하지 마세요 (그건 다른 메일인 "투자 뉴스
+   브리핑"에서 이미 다룹니다). 대신 3~5문장 이내로, 오늘 나온 긍정적
+   소식과 부정적 소식이 각각 무엇이었는지, 전체적으로 어느 쪽 뉴스가
+   더 많았는지를 짧게 종합하세요.
+6. 한국어로 작성하세요.
+
+[출력 형식]
+### {ticker} ({company})
+전일 종가: (실제 숫자)
+
+(3~5문장 요약)
+
+{ticker_data_path} 파일을 꼭 읽고 시작하세요.
+"""
+
+
+def build_portfolio_synthesis_prompt(ticker_payload):
+    ticker = ticker_payload["ticker"]
+    return PORTFOLIO_SYNTHESIS_TEMPLATE.format(
+        ticker=ticker,
+        company=ticker_payload["company"],
+        ticker_data_path=f"output/tickers/{ticker}.json",
+    )
+
+
 def render_ticker_fallback_section(stock):
     """Rule-based markdown for one ticker -- used both for the combined
     fallback file and as a per-ticker substitute when Copilot returns
@@ -671,6 +844,49 @@ def build_fallback_briefing(ai_input):
     return "\n".join(sections)
 
 
+def render_macro_fallback(macro_events):
+    lines = ["# 매크로 · 경제지표 브리핑 (규칙 기반 대체)", ""]
+    if not macro_events:
+        lines.append("오늘 수집된 매크로 뉴스가 없습니다.")
+        return "\n".join(lines)
+
+    for idx, ev in enumerate(macro_events, start=1):
+        lines.append(f"{idx}. {ev['title']}")
+        source_line = ev["primary_source"]
+        if ev["secondary_sources"]:
+            source_line += " (추가 출처: " + ", ".join(ev["secondary_sources"]) + ")"
+        lines.append(f"   - 출처: {source_line} / 기사 시간: {ev['published_utc']}")
+        lines.append(f"   - 링크: {ev['link']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def render_ticker_synthesis_fallback(stock):
+    """Rule-based (not AI) neutral one-liner per holding -- a count of
+    positive/negative-leaning headlines, never a buy/sell/hold call."""
+    lines = [f"### {stock['ticker']} ({stock['company']})"]
+    lines.append(format_price_line(stock["previous_close"]))
+    lines.append("")
+
+    events = stock["events"]
+    if not events:
+        lines.append("오늘 수집된 뉴스 없음.")
+        lines.append("")
+        return lines
+
+    positive = sum(1 for e in events if e["pre_direction"] > 0)
+    negative = sum(1 for e in events if e["pre_direction"] < 0)
+    neutral = len(events) - positive - negative
+    lines.append(
+        f"오늘 뉴스 {len(events)}건 중 호재 성격 {positive}건, 악재 성격 {negative}건, "
+        f"중립 {neutral}건 (규칙 기반 집계이며 AI 요약이 아닙니다). "
+        "자세한 개별 뉴스는 같은 날짜의 '투자 뉴스 브리핑' 메일을 참고하세요."
+    )
+    lines.append("")
+    return lines
+
+
 def main():
     now = datetime.now(timezone.utc)
     watchlist = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
@@ -706,14 +922,37 @@ def main():
         (fallback_dir / f"{ticker}.md").write_text(
             "\n".join(render_ticker_fallback_section(ticker_payload)), encoding="utf-8"
         )
+        # Second email: same idea, but a short neutral synthesis prompt
+        # instead of the full itemized briefing prompt.
+        (prompts_dir / f"synthesis_{ticker}.txt").write_text(
+            build_portfolio_synthesis_prompt(ticker_payload), encoding="utf-8"
+        )
+        (fallback_dir / f"synthesis_{ticker}.md").write_text(
+            "\n".join(render_ticker_synthesis_fallback(ticker_payload)), encoding="utf-8"
+        )
 
     (OUTPUT_DIR / "ticker_order.txt").write_text("\n".join(ticker_order) + "\n", encoding="utf-8")
 
     fallback = build_fallback_briefing(ai_input)
     (OUTPUT_DIR / "briefing.md").write_text(fallback, encoding="utf-8")
 
+    macro_events = collect_macro_events(now)
+    macro_payload = {
+        "generated_at_utc": ai_input["generated_at_utc"],
+        "hours_back": HOURS_BACK,
+        "events": macro_events,
+    }
+    (OUTPUT_DIR / "macro.json").write_text(
+        json.dumps(macro_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (prompts_dir / "macro.txt").write_text(build_macro_prompt(), encoding="utf-8")
+    (fallback_dir / "macro.md").write_text(render_macro_fallback(macro_events), encoding="utf-8")
+
     total_events = sum(t["event_count"] for t in ai_input["tickers"])
-    print(f"[INFO] Collected {total_events} news events across {len(watchlist)} ticker(s).")
+    print(
+        f"[INFO] Collected {total_events} ticker news events and "
+        f"{len(macro_events)} macro events across {len(watchlist)} ticker(s)."
+    )
 
 
 if __name__ == "__main__":
