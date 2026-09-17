@@ -75,16 +75,31 @@ jobs:
             first=0
 
             ticker_output="$(mktemp)"
-            copilot -p "$(cat "output/prompts/${ticker}.txt")" -s --no-ask-user > "$ticker_output" 2>/dev/null
+            ticker_stderr="$(mktemp)"
+            # Wrapped in an if/else (not a bare command) so a non-zero exit
+            # from copilot does NOT kill this whole step -- GitHub Actions
+            # runs bash steps with `set -e`, so an unguarded failing command
+            # here would abort the loop after the very first ticker, which
+            # is exactly what happened before this fix (AAPL failed, and
+            # every other ticker was silently never attempted).
+            if copilot -p "$(cat "output/prompts/${ticker}.txt")" -s --no-ask-user \
+                 > "$ticker_output" 2> "$ticker_stderr"; then
+              copilot_exit=0
+            else
+              copilot_exit=$?
+            fi
             byte_count=$(wc -c < "$ticker_output" | tr -d ' ')
 
-            if [ "$byte_count" -gt 80 ] && grep -qi "$ticker" "$ticker_output"; then
+            if [ "$copilot_exit" -eq 0 ] && [ "$byte_count" -gt 80 ] && grep -qi "$ticker" "$ticker_output"; then
               cat "$ticker_output" >> output/copilot_briefing.md
             else
-              echo "Copilot returned no usable output for $ticker (${byte_count} bytes) -- using rule-based fallback for this ticker." >&2
+              echo "Copilot failed or returned nothing usable for $ticker (exit=$copilot_exit, ${byte_count} bytes) -- using rule-based fallback for this ticker." >&2
+              echo "----- copilot stderr for $ticker -----" >&2
+              cat "$ticker_stderr" >&2
+              echo "---------------------------------------" >&2
               cat "output/fallback/${ticker}.md" >> output/copilot_briefing.md
             fi
-            rm -f "$ticker_output"
+            rm -f "$ticker_output" "$ticker_stderr"
           done < output/ticker_order.txt
 
           cp output/copilot_briefing.md output/briefing.md
