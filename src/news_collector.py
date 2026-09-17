@@ -620,42 +620,51 @@ def build_ticker_prompt(ticker_payload):
     )
 
 
+def render_ticker_fallback_section(stock):
+    """Rule-based markdown for one ticker -- used both for the combined
+    fallback file and as a per-ticker substitute when Copilot returns
+    nothing usable for that specific ticker."""
+    sections = []
+    header = f"## {stock['ticker']} - {stock['company']}"
+    if stock["is_etf"]:
+        header += f" (ETF · {stock['sector']} 섹터)" if stock["sector"] else " (ETF)"
+    sections.append(header)
+    sections.append(format_price_line(stock["previous_close"]))
+    sections.append("")
+
+    if not stock["events"]:
+        sections.append("최근 24시간 내 유효한 뉴스가 없습니다.")
+        sections.append("")
+        return sections
+
+    for idx, event in enumerate(stock["events"], start=1):
+        sign = "+" if event["pre_direction"] > 0 else ""
+        sections.append(f"### {idx}. {event['title']}")
+        sections.append(f"- 중요도: {event['pre_importance_score']}/100")
+        sections.append(f"- 방향성: {sign}{event['pre_direction']} ({event['pre_direction_label']})")
+        if stock["is_etf"]:
+            sections.append(f"- 관련: {event['related_to_display']}")
+        sections.append("- 한줄 요약: (Copilot 미사용 - 원문 제목 참고)")
+        sections.append("- 투자 코멘트: 추가 확인 필요")
+        sections.append("- 주가 영향: 추가 확인 필요")
+        source_line = event["primary_source"]
+        if event["secondary_sources"]:
+            source_line += " (추가 출처: " + ", ".join(event["secondary_sources"]) + ")"
+        sections.append(f"- 출처: {source_line}")
+        sections.append(f"- 기사 시간: {event['published_utc']}")
+        sections.append(f"- 원문 링크: {event['link']}")
+        sections.append("")
+
+    return sections
+
+
 def build_fallback_briefing(ai_input):
     sections = ["# Daily Investment News Briefing (rule-based fallback)", ""]
     sections.append(f"생성 시각(UTC): {ai_input['generated_at_utc']}")
     sections.append("")
 
     for stock in ai_input["tickers"]:
-        header = f"## {stock['ticker']} - {stock['company']}"
-        if stock["is_etf"]:
-            header += f" (ETF · {stock['sector']} 섹터)" if stock["sector"] else " (ETF)"
-        sections.append(header)
-        sections.append(format_price_line(stock["previous_close"]))
-        sections.append("")
-
-        if not stock["events"]:
-            sections.append("최근 24시간 내 유효한 뉴스가 없습니다.")
-            sections.append("")
-            continue
-
-        for idx, event in enumerate(stock["events"], start=1):
-            sign = "+" if event["pre_direction"] > 0 else ""
-            sections.append(f"### {idx}. {event['title']}")
-            sections.append(f"- 중요도: {event['pre_importance_score']}/100")
-            sections.append(f"- 방향성: {sign}{event['pre_direction']} ({event['pre_direction_label']})")
-            if stock["is_etf"]:
-                sections.append(f"- 관련: {event['related_to_display']}")
-            sections.append("- 한줄 요약: (Copilot 미사용 - 원문 제목 참고)")
-            sections.append("- 투자 코멘트: 추가 확인 필요")
-            sections.append("- 주가 영향: 추가 확인 필요")
-            source_line = event["primary_source"]
-            if event["secondary_sources"]:
-                source_line += " (추가 출처: " + ", ".join(event["secondary_sources"]) + ")"
-            sections.append(f"- 출처: {source_line}")
-            sections.append(f"- 기사 시간: {event['published_utc']}")
-            sections.append(f"- 원문 링크: {event['link']}")
-            sections.append("")
-
+        sections.extend(render_ticker_fallback_section(stock))
         sections.append("---")
         sections.append("")
 
@@ -669,8 +678,10 @@ def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
     tickers_dir = OUTPUT_DIR / "tickers"
     prompts_dir = OUTPUT_DIR / "prompts"
+    fallback_dir = OUTPUT_DIR / "fallback"
     tickers_dir.mkdir(exist_ok=True)
     prompts_dir.mkdir(exist_ok=True)
+    fallback_dir.mkdir(exist_ok=True)
 
     ai_input = build_ai_input(watchlist, now)
     (OUTPUT_DIR / "ai_input.json").write_text(
@@ -687,6 +698,13 @@ def main():
         )
         (prompts_dir / f"{ticker}.txt").write_text(
             build_ticker_prompt(ticker_payload), encoding="utf-8"
+        )
+        # Used by the workflow if Copilot returns nothing usable for this
+        # specific ticker, so one bad/empty AI response can't blank out an
+        # entire ticker's section (or, worse, silently pass as "successful"
+        # with nothing in it).
+        (fallback_dir / f"{ticker}.md").write_text(
+            "\n".join(render_ticker_fallback_section(ticker_payload)), encoding="utf-8"
         )
 
     (OUTPUT_DIR / "ticker_order.txt").write_text("\n".join(ticker_order) + "\n", encoding="utf-8")

@@ -55,6 +55,15 @@ jobs:
           # One combined prompt covering every ticker was too big for the
           # CLI to read in a single pass, so each ticker gets its own
           # invocation over its own small data file (see news_collector.py).
+          #
+          # Each ticker's output is validated on its own before it's used:
+          # if Copilot returns nothing usable for a given ticker (empty,
+          # truncated, auth failure, or a CLI bug that swallows the real
+          # response -- this has happened), that ticker's rule-based
+          # fallback section (output/fallback/{TICKER}.md) is substituted
+          # in instead of leaving a blank gap. This way one bad response
+          # can't blank out the whole email while the step still reports
+          # success.
           : > output/copilot_briefing.md
           first=1
           while IFS= read -r ticker; do
@@ -64,17 +73,22 @@ jobs:
               printf '\n---\n\n' >> output/copilot_briefing.md
             fi
             first=0
-            if ! copilot -p "$(cat "output/prompts/${ticker}.txt")" -s --no-ask-user >> output/copilot_briefing.md; then
-              echo "Copilot failed for $ticker -- its section will be missing from the AI briefing." >&2
+
+            ticker_output="$(mktemp)"
+            copilot -p "$(cat "output/prompts/${ticker}.txt")" -s --no-ask-user > "$ticker_output" 2>/dev/null
+            byte_count=$(wc -c < "$ticker_output" | tr -d ' ')
+
+            if [ "$byte_count" -gt 80 ] && grep -qi "$ticker" "$ticker_output"; then
+              cat "$ticker_output" >> output/copilot_briefing.md
+            else
+              echo "Copilot returned no usable output for $ticker (${byte_count} bytes) -- using rule-based fallback for this ticker." >&2
+              cat "output/fallback/${ticker}.md" >> output/copilot_briefing.md
             fi
+            rm -f "$ticker_output"
           done < output/ticker_order.txt
 
-          if [ -s output/copilot_briefing.md ]; then
-            cp output/copilot_briefing.md output/briefing.md
-            echo "Copilot briefing generated (per-ticker)."
-          else
-            echo "Copilot returned no briefing for any ticker. Keeping fallback."
-          fi
+          cp output/copilot_briefing.md output/briefing.md
+          echo "Briefing assembled (AI per ticker where it produced usable output, rule-based fallback otherwise)."
 
       - name: Show final briefing
         if: always()
